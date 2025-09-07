@@ -3,7 +3,7 @@ import pandas as pd
 import geopandas as gpd
 import matplotlib.pyplot as plt
 import contextily as ctx
-import csv
+from sklearn.preprocessing import MinMaxScaler
 
 tract_df = pd.read_csv("tracts_df.csv")
 
@@ -22,7 +22,6 @@ gdf_tracts["TRACTCE"] = gdf_tracts["TRACTCE"].astype(str).str.zfill(6)
 
 
 target = {
-    "002300": ["2"],               # Tract 23, BG 2
     "000505": ["2"],               # Tract 5.05, BG 2
     "000504": ["1"],               # Tract 5.04, BG 1
     "000600": ["*"],               # Tract 6, all BGs
@@ -47,12 +46,12 @@ tracts_web_mercator = tracts_merged.to_crs(epsg=3857)
 
 
 st.set_page_config(
-    page_title="District 5 Importance Map",
+    page_title="District 5 Importance Index Map",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-st.title("District 5 Importance Map")
+st.title("District 5 Importance Index")
 
 st.write("""
 Adjust the sliders to favor certain demographics over others.
@@ -64,7 +63,7 @@ Adjust the sliders to favor certain demographics over others.
 st.write("""
 When adjusting the sliders, you can think of a 0 representing
          a group that you would not want to canvass at all
-         and a 10 representing a group you want to reach as much
+         and a 1 representing a group you want to reach as much
          as possible.\n
 
 """)
@@ -81,34 +80,42 @@ with col1:
     st.header("Adjust Weights")
 
     with st.form(key="weight_form"):
-        population_weight = st.slider("Population of Tract", 0, 10, 2)
-        income_weight = st.slider("Standardized Median Household Income", 0, 10, 1)
-        bachelors_weight = st.slider("Percent Bachelors or Higher", 0, 10, 9)
-        pct_owned_weight = st.slider("Percent Homeowners", 0, 10, 1)
-        pct_rented_weight = st.slider("Percent Renters", 0, 10, 10)
-        pct_18_24_weight = st.slider("Percent Aged 18-24", 0, 10, 1)
-        pct_25_34_weight = st.slider("Percent Aged 25-34", 0, 10, 10)
-        pct_35_44_weight = st.slider("Percent Aged 35-44", 0, 10, 7)
-        pct_45_66_weight = st.slider("Percent Aged 45-66", 0, 10, 1)
-        pct_67_plus_weight = st.slider("Percent Aged 67+", 0, 10, 3)
+        population_weight = st.slider("Population of Tract", 0.0, 1.0, 0.5)
+        income_weight = st.slider("Standardized Median Household Income", 0.0, 1.0, 0.5)
+        bachelors_weight = st.slider("Percent Bachelors or Higher", 0.0, 1.0, 0.5)
+        pct_owned_weight = st.slider("Percent Homeowners", 0.0, 1.0, 0.5)
+        pct_rented_weight = st.slider("Percent Renters", 0.0, 1.0, 0.5)
+        pct_18_24_weight = st.slider("Percent Aged 18-24", 0.0, 1.0, 0.5)
+        pct_25_34_weight = st.slider("Percent Aged 25-34", 0.0, 1.0, 0.5)
+        pct_35_44_weight = st.slider("Percent Aged 35-44", 0.0, 1.0, 0.5)
+        pct_45_66_weight = st.slider("Percent Aged 45-66", 0.0, 1.0, 0.5)
+        pct_67_plus_weight = st.slider("Percent Aged 67+", 0.0, 1.0, 0.5)
 
         submit_button = st.form_submit_button(label="Update Map")
 
 if submit_button:
 
-    tracts_web_mercator["median_household_income_scaled"] = (
-        (tracts_web_mercator["median_household_income"] - tracts_web_mercator["median_household_income"].min()) /
-        (tracts_web_mercator["median_household_income"].max() - tracts_web_mercator["median_household_income"].min())
-    ) * 100
+    quant_cols = [
+        "population",
+        "median_household_income",
+        "pct_bachelors_or_higher",
+        "pct_owned",
+        "pct_rented",
+        "pct_18-24",
+        "pct_25-34",
+        "pct_35-44",
+        "pct_45-66",
+        "pct_67+",
+    ]
+    qual_cols = [c for c in tracts_web_mercator.columns if c not in quant_cols]
 
-    tracts_web_mercator["population_scaled"] = (
-        (tracts_web_mercator["population"] - tracts_web_mercator["population"].min()) /
-        (tracts_web_mercator["population"].max() - tracts_web_mercator["population"].min())
-    ) * 100
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    df_scaled = pd.DataFrame(scaler.fit_transform(tracts_web_mercator[quant_cols]), columns=quant_cols)
+    df_scaled = pd.merge(tracts_web_mercator[qual_cols], df_scaled, left_index=True, right_index=True)
 
     weights = {
-        "population_scaled": population_weight,
-        "median_household_income_scaled": income_weight,
+        "population": population_weight,
+        "median_household_income": income_weight,
         "pct_bachelors_or_higher": bachelors_weight,
         "pct_owned": pct_owned_weight,
         "pct_rented": pct_rented_weight,
@@ -122,19 +129,22 @@ if submit_button:
     total_w = sum(weights.values())
     weights = {k: v / total_w for k, v in weights.items()}
 
-    tracts_web_mercator["importance_score"] = sum(
-        tracts_web_mercator[feat] * w for feat, w in weights.items()
-    )
+    for col, w in weights.items():
+        df_scaled[col] = df_scaled[col] * w
 
-    with col2:
-        fig, ax = plt.subplots(figsize=(12, 10))
-        tracts_web_mercator.plot(column="importance_score",
-                                 legend=True,
-                                 cmap="coolwarm",
-                                 alpha=0.7,
-                                 ax=ax)
-        ax.set_title("Importance Score by Census Tract", fontsize=16)
-        ax.set_axis_off()
-        ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik,
-                        zoom=13, crs=tracts_web_mercator.crs.to_string())
-        st.pyplot(fig)
+    df_scaled["importance_index"] = df_scaled[quant_cols].sum(axis=1)
+    st.session_state["df_scaled"] = df_scaled
+
+    if "df_scaled" in st.session_state:
+        with col2:
+                fig, ax = plt.subplots(figsize=(12, 10))
+                df_scaled.plot(column="importance_index",
+                       legend=True,
+                       cmap="coolwarm",
+                       alpha=0.7,
+                       ax=ax)
+                ax.set_title("Importance Index by Census Tract", fontsize=16)
+                ax.set_axis_off()
+                ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik,
+                        zoom=13, crs=df_scaled.crs.to_string())
+                st.pyplot(fig)
